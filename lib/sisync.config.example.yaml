@@ -1,0 +1,10 @@
+repo-link: https://github.com/YOUR_USER/dotfiles.git
+cron: "*/5 * * * *"
+files:
+  zshrc:
+    repo-path: shell/zshrc
+    machine-path: ~/.zshrc
+  espanso-config:
+    repo-path: espanso/default.yml
+    machine-path: ~/Library/Application Support/espanso/config/default.yml
+
