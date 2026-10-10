@@ -1,0 +1,17 @@
+{
+    "workbench.activityBar.location": "hidden",
+    "workbench.sideBar.location": "right",
+    "workbench.editor.showTabs": "single",
+    "workbench.editor.showIcons": false,
+    "workbench.editor.labelFormat": "medium",
+    "breadcrumbs.enabled": false,
+    "claudeCode.preferredLocation": "panel",
+    "chat.titleBar.openInAgentsWindow.enabled": false,
+    "chat.titleBar.signIn.enabled": false,
+    "workbench.navigationControl.enabled": false,
+    "workbench.browser.showInTitleBar": false,
+    "workbench.layoutControl.enabled": false,
+    "python.showRunFileInEditorTitleMenu": false,
+    "window.commandCenter": false,
+    "workbench.editor.editorActionsLocation": "hidden"
+}
