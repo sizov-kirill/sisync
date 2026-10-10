@@ -1,38 +1,29 @@
 # sisync
 
-CLI для синхронизации выбранных файлов между компьютерами через Git.
-
-Код инструмента, сборка, установщик, тесты и пример конфига находятся в [`lib/`](lib/):
-
-```text
-lib/
-├── src/sisync/
-├── tests/
-├── pyproject.toml
-├── install.sh
-├── sisync.config.example.yaml
-└── README.md
-```
-
-## Установка
-
-После публикации каталога `lib/` в публичной ветке `main`:
+Синхронизирует выбранные файлы между Mac через Git: сначала конфиг, затем файлы. При различиях побеждает более новая версия по времени изменения локального файла или последнего коммита.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sizov-kirill/sisync/main/lib/install.sh | sh
 ```
 
-На Mac нужен Git. Установщик при необходимости скачает uv и Python. После установки откройте новый терминал и настройте `~/.sisync/sisync.config.yaml`.
+Нужен Git с настроенным доступом к репозиторию и именем/email для коммитов. Установщик сам скачает uv и Python при необходимости. После установки откройте новый терминал.
 
-Подробная [инструкция по установке, настройке и запуску](lib/README.md).
+Создайте `~/.sisync/sisync.config.yaml` с адресом своего репозитория и нужными файлами:
 
-## Разработка
-
-Из корня репозитория:
-
-```sh
-uv tool install ./lib
-uv run --project lib python -m unittest discover -s lib/tests -v
+```yaml
+repo-link: git@github.com:YOUR_USER/dotfiles.git
+cron: "*/10 * * * *"
+files:
+  vscode-settings:
+    repo-path: vscode/settings.json
+    machine-path: ~/Library/Application Support/Code/User/settings.json
 ```
 
-Исходные материалы: [исследование альтернатив](RESEARCH.md) и [функциональные требования](FUNCTIONAL_REQUIREMENTS.md).
+```sh
+sisync list        # показать доступные команды
+sisync update      # синхронизировать сейчас
+sisync cron start  # включить синхронизацию каждые 10 минут
+sisync cron status # проверить, установлено ли задание cron
+```
+
+На другом Mac установите sisync и скопируйте тот же конфиг в `~/.sisync/sisync.config.yaml`.

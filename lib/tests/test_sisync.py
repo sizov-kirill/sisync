@@ -13,7 +13,7 @@ import yaml
 
 from sisync.cli import main
 from sisync.config import CONFIG_NAME, SisyncError, parse_config, validate_cron
-from sisync.cron import BEGIN, END, render_crontab, start
+from sisync.cron import BEGIN, END, render_crontab, start, status
 from sisync.sync import Repository, install_file, locked, read_local, RemoteFile, update
 
 
@@ -245,6 +245,52 @@ class SyncTests(unittest.TestCase):
                 self.assertIn(str(self.a / ".sisync" / CONFIG_NAME), output.getvalue())
 
 
+class CliTests(unittest.TestCase):
+    def test_list_works_with_missing_or_invalid_config_without_changing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".sisync" / CONFIG_NAME
+            for content in (None, "invalid config"):
+                if content is not None:
+                    config.parent.mkdir()
+                    config.write_text(content)
+                before = set(home.rglob("*"))
+                with self.subTest(config=content), patch("sisync.cli.Path.home", return_value=home), \
+                        contextlib.redirect_stdout(io.StringIO()) as output, \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(main(["list"]), 0)
+                lines = output.getvalue().splitlines()
+                self.assertEqual(len(lines), 4)
+                for command in ("sisync list", "sisync update", "sisync cron start", "sisync cron status"):
+                    self.assertTrue(any(line.startswith(command + " ") for line in lines))
+                self.assertEqual(errors.getvalue(), "")
+                self.assertEqual(set(home.rglob("*")), before)
+                if content is not None:
+                    self.assertEqual(config.read_text(), content)
+
+    def test_list_from_process_arguments(self):
+        with patch.object(sys, "argv", ["sisync", "list"]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(), 0)
+        self.assertIn("sisync cron start", output.getvalue())
+
+    def test_cron_status_without_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch("sisync.cli.Path.home", return_value=home), \
+                    patch("sisync.cron.read_crontab", return_value=""), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(["cron", "status"]), 0)
+            self.assertIn("Cron выключен", output.getvalue())
+            self.assertEqual(list(home.iterdir()), [])
+
+    def test_cron_status_read_error_returns_failure(self):
+        with patch("sisync.cron.read_crontab", side_effect=SisyncError("permission denied")), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(["cron", "status"]), 1)
+        self.assertIn("permission denied", errors.getvalue())
+
+
 class ConfigTests(unittest.TestCase):
     def parse(self, body):
         return parse_config(body.encode(), Path("/tmp/sisync-home"))
@@ -275,6 +321,46 @@ class ConfigTests(unittest.TestCase):
 
 
 class CronTests(unittest.TestCase):
+    def test_status_disabled_for_empty_unrelated_or_commented_jobs(self):
+        home = Path("/tmp/sisync-home")
+        job = render_crontab("", "*/10 * * * *", home, sys.executable, "/usr/bin")
+        for table in ("", "0 9 * * * /usr/bin/true\n", f"{BEGIN}\n{END}\n",
+                      job.replace("*/10", "# */10")):
+            with self.subTest(table=table), patch("sisync.cron.read_crontab", return_value=table):
+                messages = []
+                self.assertFalse(status(home, messages.append))
+                self.assertEqual(messages, ["Cron выключен: задание sisync не установлено."])
+
+    def test_status_reports_installed_schedule_with_spaces_and_percent_in_paths(self):
+        home = Path("/tmp/home with spaces%")
+        table = render_crontab("0 9 * * * /usr/bin/true\n", "*/10 * * * *", home,
+                               "/tmp/python env/bin/python", "/tmp/with spaces%:/usr/bin")
+        with patch("sisync.cron.read_crontab", return_value=table):
+            messages = []
+            self.assertTrue(status(home, messages.append))
+        self.assertEqual(messages[0], "Cron включён: */10 * * * *")
+        self.assertIn(str(home / ".sisync/sisync.log"), messages[1])
+
+    def test_status_rejects_malformed_blocks_and_jobs(self):
+        for table in (BEGIN, END, f"{BEGIN}\n{BEGIN}\n{END}",
+                      f"{BEGIN}\ninvalid\n{END}",
+                      f"{BEGIN}\n*/10 * * * * /usr/bin/true\n{END}",
+                      f"{BEGIN}\n*/10 * * * * 'unclosed\n{END}"):
+            with self.subTest(table=table), patch("sisync.cron.read_crontab", return_value=table):
+                with self.assertRaises(SisyncError):
+                    status(Path("/tmp/sisync-home"), lambda message: None)
+
+    def test_status_handles_crontab_read_errors(self):
+        failures = (FileNotFoundError(), subprocess.TimeoutExpired("crontab", 15))
+        for failure in failures:
+            with self.subTest(failure=failure), patch("sisync.cron.subprocess.run", side_effect=failure):
+                with self.assertRaises(SisyncError):
+                    status(Path("/tmp/sisync-home"))
+        denied = subprocess.CompletedProcess(["crontab", "-l"], 1, "", "permission denied")
+        with patch("sisync.cron.subprocess.run", return_value=denied):
+            with self.assertRaisesRegex(SisyncError, "permission denied"):
+                status(Path("/tmp/sisync-home"))
+
     def test_preserves_other_jobs_and_replaces_own_job_idempotently(self):
         old = "MAILTO=user@example.invalid\n0 9 * * * /usr/bin/true\n"
         home = Path("/tmp/home with spaces%")
@@ -301,8 +387,12 @@ class CronTests(unittest.TestCase):
             fake.write_text(f"#!{sys.executable}\nimport pathlib, sys\np=pathlib.Path({str(table)!r})\nif sys.argv[1]=='-l':\n if not p.exists():\n  print('no crontab for test',file=sys.stderr);sys.exit(1)\n sys.stdout.write(p.read_text())\nelse:\n p.write_text(sys.stdin.read())\n")
             fake.chmod(0o700)
             with patch.dict(os.environ, {"PATH": f"{home}:{os.environ.get('PATH', '')}"}):
+                self.assertFalse(status(home, lambda message: None))
+                self.assertFalse(table.exists())
                 start(home, lambda message: None)
                 first = table.read_text()
+                self.assertTrue(status(home, lambda message: None))
+                self.assertEqual(table.read_text(), first)
                 start(home, lambda message: None)
                 self.assertEqual(first, table.read_text())
                 self.assertIn("-m sisync update", first)
