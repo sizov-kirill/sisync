@@ -1,0 +1,6 @@
+repo-link: git@github.com:sizov-kirill/sisync.git
+cron: "*/10 * * * *"
+files:
+  vscode-settings:
+    repo-path: vscode.settings.json
+    machine-path: "~/Library/Application Support/Code/User/settings.json"
