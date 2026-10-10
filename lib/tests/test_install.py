@@ -58,7 +58,7 @@ fi
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertIn("--python\n3.12\n--reinstall\n", calls)
-        self.assertIn("https://github.com/sizov-kirill/sisync/archive/refs/heads/develop.tar.gz#subdirectory=lib", calls.splitlines())
+        self.assertIn("https://github.com/sizov-kirill/sisync/archive/refs/heads/main.tar.gz#subdirectory=lib", calls.splitlines())
         self.assertIn("tool\nupdate-shell\n", calls)
         self.assertEqual(config.read_text(), "existing config\n")
 

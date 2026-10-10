@@ -29,7 +29,7 @@ main() {
         sisync_uv="$HOME/.local/bin/uv"
     fi
 
-    sisync_source=${SISYNC_SOURCE:-https://github.com/sizov-kirill/sisync/archive/refs/heads/develop.tar.gz#subdirectory=lib}
+    sisync_source=${SISYNC_SOURCE:-https://github.com/sizov-kirill/sisync/archive/refs/heads/main.tar.gz#subdirectory=lib}
     "$sisync_uv" tool install --python 3.12 --reinstall "$sisync_source"
     sisync_bin=$("$sisync_uv" tool dir --bin)
     if ! "$sisync_uv" tool update-shell; then

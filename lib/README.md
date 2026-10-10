@@ -7,21 +7,21 @@
 На другом Mac с установленным Git выполните одну команду:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sizov-kirill/sisync/develop/lib/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/sizov-kirill/sisync/main/lib/install.sh | sh
 ```
 
-Установщик скачивает sisync из ветки `develop`, при необходимости устанавливает [uv](https://docs.astral.sh/uv/getting-started/installation/) и Python 3.12, а затем добавляет каталог CLI в настройки `PATH`. Не нужны `sudo`, ручное клонирование и активация виртуального окружения. После установки откройте новый терминал. Для текущего терминала установщик выведет полный путь к команде.
+Установщик скачивает sisync из ветки `main`, при необходимости устанавливает [uv](https://docs.astral.sh/uv/getting-started/installation/) и Python 3.12, а затем добавляет каталог CLI в настройки `PATH`. Не нужны `sudo`, ручное клонирование и активация виртуального окружения. После установки откройте новый терминал. Для текущего терминала установщик выведет полный путь к команде.
 
 Если Git ещё не установлен, на macOS выполните `xcode-select --install`, завершите установку Command Line Tools и повторите команду выше. Git-авторизацию и конфиг синхронизации нужно настроить отдельно, как описано ниже.
 
 **Обновление:** повторите ту же команду установки. Если автоматическая синхронизация уже включена, после обновления выполните `sisync cron start`, чтобы обновить путь к Python в расписании. Пользовательский YAML установщик не меняет.
 
-Команда доступна после публикации каталога `lib/` в ветке `develop` на GitHub. Репозиторий должен быть публичным для установки без авторизации.
+Команда доступна после публикации каталога `lib/` в ветке `main` на GitHub. Репозиторий должен быть публичным для установки без авторизации.
 
 Если uv уже установлен и доступен в `PATH`, можно установить CLI напрямую:
 
 ```sh
-uv tool install --python 3.12 --reinstall 'https://github.com/sizov-kirill/sisync/archive/refs/heads/develop.tar.gz#subdirectory=lib'
+uv tool install --python 3.12 --reinstall 'https://github.com/sizov-kirill/sisync/archive/refs/heads/main.tar.gz#subdirectory=lib'
 ```
 
 ### Установка из исходников
@@ -60,7 +60,7 @@ sisync использует эти настройки. Доступ к репо�
 ```sh
 mkdir -p ~/.sisync
 curl --fail --location \
-  https://raw.githubusercontent.com/sizov-kirill/sisync/develop/lib/sisync.config.example.yaml \
+  https://raw.githubusercontent.com/sizov-kirill/sisync/main/lib/sisync.config.example.yaml \
   -o ~/.sisync/sisync.config.yaml
 ```
 

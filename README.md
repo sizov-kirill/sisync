@@ -16,10 +16,10 @@ lib/
 
 ## Установка
 
-После публикации каталога `lib/` в публичной ветке `develop`:
+После публикации каталога `lib/` в публичной ветке `main`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sizov-kirill/sisync/develop/lib/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/sizov-kirill/sisync/main/lib/install.sh | sh
 ```
 
 На Mac нужен Git. Установщик при необходимости скачает uv и Python. После установки откройте новый терминал и настройте `~/.sisync/sisync.config.yaml`.
