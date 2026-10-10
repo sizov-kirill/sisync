@@ -11,10 +11,72 @@ from unittest.mock import patch
 
 import yaml
 
+from sisync import __version__
 from sisync.cli import main
 from sisync.config import CONFIG_NAME, SisyncError, parse_config, validate_cron
 from sisync.cron import BEGIN, END, render_crontab, start, status
-from sisync.sync import Repository, install_file, locked, read_local, RemoteFile, update
+from sisync.sync import Repository, git_environment, install_file, locked, read_local, RemoteFile, update
+
+
+class GitEnvironmentTests(unittest.TestCase):
+    def test_cron_falls_back_to_gui_domain_when_its_launchd_environment_is_empty(self):
+        gui = ("gui/501 = {\n\tenvironment = {\n"
+               "\t\tSSH_AUTH_SOCK => /tmp/login agent/Listeners\n\t}\n"
+               "\tservices = {\n\t\tenvironment = {\n"
+               "\t\t\tSSH_AUTH_SOCK => /tmp/unrelated-agent\n\t\t}\n\t}\n}")
+        results = [subprocess.CompletedProcess([], 0, "", ""),
+                   subprocess.CompletedProcess([], 0, gui, "")]
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("sisync.sync.sys.platform", "darwin"), \
+                patch("sisync.sync.os.getuid", return_value=501), \
+                patch("sisync.sync.subprocess.run", side_effect=results) as run:
+            self.assertEqual(git_environment()["SSH_AUTH_SOCK"], "/tmp/login agent/Listeners")
+            self.assertEqual(run.call_args.args[0], ["/bin/launchctl", "print", "gui/501"])
+
+    def test_gui_domain_without_agent_does_not_use_a_service_environment(self):
+        gui = ("gui/501 = {\n\tenvironment = {\n\t\tOTHER => value\n\t}\n"
+               "\tservices = {\n\t\tenvironment = {\n"
+               "\t\t\tSSH_AUTH_SOCK => /tmp/unrelated-agent\n\t\t}\n\t}\n}")
+        results = [subprocess.CompletedProcess([], 0, "", ""),
+                   subprocess.CompletedProcess([], 0, gui, "")]
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("sisync.sync.sys.platform", "darwin"), \
+                patch("sisync.sync.subprocess.run", side_effect=results):
+            self.assertNotIn("SSH_AUTH_SOCK", git_environment())
+
+    def test_macos_cron_discovers_agent_for_git_without_changing_process_environment(self):
+        result = subprocess.CompletedProcess([], 0, "/tmp/login-agent/Listeners\n", "")
+        with patch.dict(os.environ, {"HOME": "/tmp/home"}, clear=True), \
+                patch("sisync.sync.sys.platform", "darwin"), \
+                patch("sisync.sync.subprocess.run", return_value=result) as run:
+            env = git_environment()
+            self.assertEqual(env["SSH_AUTH_SOCK"], "/tmp/login-agent/Listeners")
+            self.assertEqual(env["GIT_SSH_COMMAND"], "ssh -o BatchMode=yes")
+            self.assertNotIn("SSH_AUTH_SOCK", os.environ)
+            self.assertEqual(run.call_args.args[0], ["/bin/launchctl", "getenv", "SSH_AUTH_SOCK"])
+
+    def test_existing_agent_is_preserved_and_other_platforms_skip_launchd(self):
+        for platform, environment in (("darwin", {"SSH_AUTH_SOCK": "/tmp/custom-agent"}),
+                                      ("linux", {})):
+            with self.subTest(platform=platform), patch.dict(os.environ, environment, clear=True), \
+                    patch("sisync.sync.sys.platform", platform), \
+                    patch("sisync.sync.subprocess.run") as run:
+                env = git_environment()
+                self.assertEqual(env.get("SSH_AUTH_SOCK"), environment.get("SSH_AUTH_SOCK"))
+                run.assert_not_called()
+
+    def test_unavailable_launchd_leaves_ssh_identity_file_authentication_usable(self):
+        outcomes = (subprocess.CompletedProcess([], 0, "\n", ""),
+                    subprocess.CompletedProcess([], 1, "/tmp/ignored", "unavailable"),
+                    FileNotFoundError(), subprocess.TimeoutExpired("launchctl", 5))
+        for outcome in outcomes:
+            kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with self.subTest(outcome=outcome), patch.dict(os.environ, {}, clear=True), \
+                    patch("sisync.sync.sys.platform", "darwin"), \
+                    patch("sisync.sync.subprocess.run", **kwargs):
+                env = git_environment()
+                self.assertNotIn("SSH_AUTH_SOCK", env)
+                self.assertEqual(env["GIT_SSH_COMMAND"], "ssh -o BatchMode=yes")
 
 
 class SyncTests(unittest.TestCase):
@@ -246,6 +308,111 @@ class SyncTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_log_prints_contents_unchanged_without_valid_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            state = home / ".sisync"
+            state.mkdir()
+            logfile = state / "sisync.log"
+            for config in (None, "invalid config"):
+                if config is not None:
+                    (state / CONFIG_NAME).write_text(config)
+                for contents in ("", "[2026-10-10 21:47:59+03:00] Без изменений\r\nsecond line\nlast line"):
+                    logfile.write_bytes(contents.encode())
+                    before = {path: path.read_bytes() for path in state.iterdir()}
+                    with self.subTest(config=config, contents=contents), \
+                            patch("sisync.cli.Path.home", return_value=home), \
+                            contextlib.redirect_stdout(io.StringIO()) as output, \
+                            contextlib.redirect_stderr(io.StringIO()) as errors:
+                        self.assertEqual(main(["log"]), 0)
+                    self.assertEqual(output.getvalue(), contents)
+                    self.assertEqual(errors.getvalue(), "")
+                    self.assertEqual({path: path.read_bytes() for path in state.iterdir()}, before)
+
+    def test_missing_log_reports_path_without_creating_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch("sisync.cli.Path.home", return_value=home), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(main(["log"]), 1)
+            self.assertEqual(output.getvalue(), "")
+            self.assertIn("Лог ещё не создан", errors.getvalue())
+            self.assertIn(str(home / ".sisync" / "sisync.log"), errors.getvalue())
+            self.assertEqual(list(home.iterdir()), [])
+
+    def test_unknown_commands_suggest_list_before_loading_config(self):
+        for args in (["go"], ["go", "--help"], ["cron", "go"]):
+            with self.subTest(args=args), \
+                    patch("sisync.cli.load_config", side_effect=SisyncError("invalid config")) as config, \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(main(args), 2)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(errors.getvalue(), "такой команды нет, run sisync list\n")
+            config.assert_not_called()
+
+    def test_version_commands_work_without_valid_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".sisync" / CONFIG_NAME
+            for content in (None, "invalid config"):
+                if content is not None:
+                    config.parent.mkdir()
+                    config.write_text(content)
+                before = set(home.rglob("*"))
+                for command in ("version", "--version"):
+                    with self.subTest(config=content, command=command), \
+                            patch("sisync.cli.Path.home", return_value=home), \
+                            patch.object(sys, "argv", ["sisync", command]), \
+                            contextlib.redirect_stdout(io.StringIO()) as output, \
+                            contextlib.redirect_stderr(io.StringIO()) as errors:
+                        if command == "--version":
+                            with self.assertRaises(SystemExit) as result:
+                                main()
+                            self.assertEqual(result.exception.code, 0)
+                        else:
+                            self.assertEqual(main(), 0)
+                    self.assertEqual(output.getvalue(), __version__ + "\n")
+                    self.assertEqual(errors.getvalue(), "")
+                    self.assertEqual(set(home.rglob("*")), before)
+                    if content is not None:
+                        self.assertEqual(config.read_text(), content)
+
+    def assert_timestamped(self, output, messages):
+        lines = output.splitlines()
+        self.assertEqual(len(lines), len(messages))
+        for line, message in zip(lines, messages):
+            self.assertRegex(line, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] ")
+            self.assertEqual(line.split("] ", 1)[1], message)
+
+    def test_update_timestamps_each_output_line(self):
+        def sync(home, emit):
+            emit("Скачано: config\nБез изменений: zshrc")
+
+        with patch("sisync.cli.load_config"), patch("sisync.cli.update", side_effect=sync), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["update"]), 0)
+        self.assert_timestamped(output.getvalue(), ["Скачано: config", "Без изменений: zshrc"])
+
+    def test_update_timestamps_errors_and_interruptions(self):
+        for error, code, messages in (
+            (SisyncError("Git ls-remote: permission denied\nfatal: cannot read remote"), 1,
+             ["sisync: Git ls-remote: permission denied", "fatal: cannot read remote"]),
+            (KeyboardInterrupt(), 130, ["sisync: прервано."]),
+        ):
+            with self.subTest(error=error), patch("sisync.cli.load_config"), \
+                    patch("sisync.cli.update", side_effect=error), \
+                    contextlib.redirect_stderr(io.StringIO()) as output:
+                self.assertEqual(main(["update"]), code)
+            self.assert_timestamped(output.getvalue(), messages)
+
+    def test_config_errors_have_timestamps_before_update_starts(self):
+        with patch("sisync.cli.load_config", side_effect=SisyncError("missing config")), \
+                contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(main(["update"]), 1)
+        self.assert_timestamped(output.getvalue(), ["sisync: missing config"])
+
     def test_list_works_with_missing_or_invalid_config_without_changing_files(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -260,8 +427,8 @@ class CliTests(unittest.TestCase):
                         contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(main(["list"]), 0)
                 lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), 4)
-                for command in ("sisync list", "sisync update", "sisync cron start", "sisync cron status"):
+                self.assertEqual(len(lines), 6)
+                for command in ("sisync list", "sisync version", "sisync log", "sisync update", "sisync cron start", "sisync cron status"):
                     self.assertTrue(any(line.startswith(command + " ") for line in lines))
                 self.assertEqual(errors.getvalue(), "")
                 self.assertEqual(set(home.rglob("*")), before)

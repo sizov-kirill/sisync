@@ -7,6 +7,7 @@ import fcntl
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 
 from .config import CONFIG_NAME, SisyncError, parse_config
@@ -84,15 +85,55 @@ def locked(state_dir):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def git_environment():
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
+        env.pop(key, None)
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_LITERAL_PATHSPECS": "1",
+                "GIT_SSH_COMMAND": "ssh -o BatchMode=yes", "LC_ALL": "C"})
+    # Cron does not inherit the login session's SSH agent. Resolve it at run
+    # time because launchd's socket path can change after logging in again.
+    if sys.platform == "darwin" and not env.get("SSH_AUTH_SOCK"):
+        commands = (["/bin/launchctl", "getenv", "SSH_AUTH_SOCK"],
+                    ["/bin/launchctl", "print", f"gui/{os.getuid()}"])
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, capture_output=True,
+                    text=True, env=env, timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue  # SSH may still use a configured identity file.
+            if result.returncode:
+                continue
+            if command[1] == "getenv":
+                socket = result.stdout.strip()
+            else:
+                # getenv queries the caller's domain, which is not the GUI
+                # domain under cron. Read only the GUI domain's environment,
+                # not similarly named variables inside individual services.
+                socket = ""
+                inside = False
+                for line in result.stdout.splitlines():
+                    if line == "\tenvironment = {":
+                        inside = True
+                    elif inside and line == "\t}":
+                        break
+                    elif inside:
+                        key, separator, value = line.strip().partition(" => ")
+                        if key == "SSH_AUTH_SOCK" and separator:
+                            socket = value
+            if socket:
+                env["SSH_AUTH_SOCK"] = socket
+                break
+    return env
+
+
 class Repository:
     def __init__(self, directory, url):
         self.directory = directory
-        self.env = os.environ.copy()
-        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-                    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
-            self.env.pop(key, None)
-        self.env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_LITERAL_PATHSPECS": "1",
-                         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes", "LC_ALL": "C"})
+        self.env = git_environment()
         self.git("init", "--bare", "--quiet", ".")
         self.git("remote", "add", "origin", url)
         refs = self.git("ls-remote", "--symref", "origin").decode().splitlines()
