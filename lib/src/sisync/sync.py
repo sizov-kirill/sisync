@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from .config import CONFIG_NAME, SisyncError, parse_config
+from .config import CONFIG_NAME, SisyncError, parse_config, text
 
 
 @dataclass(frozen=True)
@@ -229,6 +229,25 @@ def load_config(home):
     if local is None:
         raise SisyncError(f"Конфиг не найден: {path}")
     return parse_config(local.data, home)
+
+
+def import_config(home, url, emit=print):
+    url = text(url, "repo-link")
+    if url.startswith("-") or url != url.strip():
+        raise SisyncError("Некорректный repo-link.")
+    state_dir = home / ".sisync"
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = state_dir / CONFIG_NAME
+    with locked(state_dir):
+        before = read_local(target)
+        with tempfile.TemporaryDirectory(prefix="git-", dir=state_dir) as directory:
+            repo = Repository(Path(directory), url)
+            remote = repo.read(CONFIG_NAME)
+            if remote is None:
+                raise SisyncError(f"В корне ветки по умолчанию не найден {CONFIG_NAME}.")
+            parse_config(remote.data, home)
+            install_file(target, remote, before)
+        emit(f"Скачано: {CONFIG_NAME} → {target}")
 
 
 def update(home, emit=print):

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-10-10
+
+### Added
+
+- `sisync from <repo-link>` downloads `sisync.config.yaml` from the root of the repository's default branch into `~/.sisync`, creating the directory when needed.
+- Validate the downloaded configuration before atomically replacing any existing config, preserve its contents and Git timestamp, and share the synchronization lock with `sisync update`.
+- Support SSH and HTTPS Git access without requiring a local config. Import only the config; run `sisync update` separately to synchronize files.
+
 ## 0.4.0 — 2026-10-10
 
 ### Added

@@ -29,4 +29,11 @@ sisync cron start  # включить синхронизацию каждые 10
 sisync cron status # проверить, установлено ли задание cron
 ```
 
-На другом Mac установите sisync и скопируйте тот же конфиг в `~/.sisync/sisync.config.yaml`.
+На другом Mac установите sisync и скачайте конфиг из своего репозитория:
+
+```sh
+sisync from git@github.com:YOUR_USER/dotfiles.git
+sisync update
+```
+
+`sisync from <repo-link>` берёт `sisync.config.yaml` из корня ветки по умолчанию, создаёт `~/.sisync` при необходимости и заменяет локальный конфиг после проверки. Можно использовать SSH- или HTTPS-адрес. Команда копирует конфиг без изменения `repo-link` внутри него; остальные файлы синхронизируются отдельной командой `sisync update`.

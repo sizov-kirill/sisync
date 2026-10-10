@@ -15,7 +15,7 @@ from sisync import __version__
 from sisync.cli import main
 from sisync.config import CONFIG_NAME, SisyncError, parse_config, validate_cron
 from sisync.cron import BEGIN, END, render_crontab, start, status
-from sisync.sync import Repository, git_environment, install_file, locked, read_local, RemoteFile, update
+from sisync.sync import Repository, git_environment, import_config, install_file, locked, read_local, RemoteFile, update
 
 
 class GitEnvironmentTests(unittest.TestCase):
@@ -151,6 +151,64 @@ class SyncTests(unittest.TestCase):
         self.run_update(self.a)
         self.put(self.b / ".sisync" / CONFIG_NAME, data, self.old)
         self.run_update(self.b)
+
+    def test_from_bootstraps_only_config_from_default_branch_without_changing_remote(self):
+        data = self.config(self.a)
+        self.remote_write(CONFIG_NAME, data, self.old)
+        self.git("--git-dir", str(self.remote), "branch", "-m", "main", "settings")
+        head = self.git("--git-dir", str(self.remote), "rev-parse", "HEAD")
+        home = self.root / "new mac"
+        with patch("sisync.cli.Path.home", return_value=home), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["from", str(self.remote)]), 0)
+        target = home / ".sisync" / CONFIG_NAME
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(int(target.stat().st_mtime), self.remote_date(CONFIG_NAME))
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertIn(str(target), output.getvalue())
+        self.assertFalse((home / ".zshrc").exists())
+        self.assertEqual(set(path.name for path in target.parent.iterdir()), {CONFIG_NAME, "update.lock"})
+        self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", "HEAD"), head)
+
+    def test_from_replaces_newer_invalid_local_config_with_exact_remote_bytes(self):
+        data = b"# Keep comments and the configured repository\n" + self.config(self.a)
+        self.remote_write(CONFIG_NAME, data, self.old)
+        target = self.b / ".sisync" / CONFIG_NAME
+        self.put(target, b"invalid local config", self.old + 100)
+        target.chmod(0o640)
+        import_config(self.b, str(self.remote), self.messages.append)
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_from_invalid_remote_config_preserves_existing_config(self):
+        before = self.config(self.b)
+        self.remote_write(CONFIG_NAME, b"invalid remote config", self.old)
+        with self.assertRaises(SisyncError):
+            import_config(self.b, str(self.remote), self.messages.append)
+        self.assertEqual((self.b / ".sisync" / CONFIG_NAME).read_bytes(), before)
+
+    def test_from_missing_remote_config_preserves_existing_config(self):
+        before = self.config(self.b)
+        for populated in (False, True):
+            if populated:
+                self.remote_write("README.md", b"No config here", self.old)
+            with self.subTest(populated=populated), self.assertRaisesRegex(SisyncError, "не найден"):
+                import_config(self.b, str(self.remote), self.messages.append)
+            self.assertEqual((self.b / ".sisync" / CONFIG_NAME).read_bytes(), before)
+
+    def test_from_unavailable_repo_preserves_config_and_cleans_temporary_checkout(self):
+        before = self.config(self.b)
+        with self.assertRaises(SisyncError):
+            import_config(self.b, str(self.root / "missing.git"), self.messages.append)
+        state = self.b / ".sisync"
+        self.assertEqual((state / CONFIG_NAME).read_bytes(), before)
+        self.assertEqual(set(path.name for path in state.iterdir()), {CONFIG_NAME, "update.lock"})
+
+    def test_from_respects_update_lock(self):
+        before = self.config(self.b)
+        with locked(self.b / ".sisync"), self.assertRaisesRegex(SisyncError, "уже идёт"):
+            import_config(self.b, str(self.remote), self.messages.append)
+        self.assertEqual((self.b / ".sisync" / CONFIG_NAME).read_bytes(), before)
 
     def test_first_publish_config_first_then_bootstrap_second_mac_and_noop(self):
         self.seed()
@@ -308,6 +366,15 @@ class SyncTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_from_requires_repository_argument_without_loading_config(self):
+        with patch("sisync.cli.load_config") as load, \
+                contextlib.redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaises(SystemExit) as result:
+            main(["from"])
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn("repo-link", errors.getvalue())
+        load.assert_not_called()
+
     def test_config_opens_vim_without_valid_config_and_returns_editor_exit_code(self):
         for contents, code in ((None, 0), ("invalid config", 7)):
             with self.subTest(contents=contents), tempfile.TemporaryDirectory(prefix="sisync editor ") as directory:
@@ -453,8 +520,8 @@ class CliTests(unittest.TestCase):
                         contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(main(["list"]), 0)
                 lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), 7)
-                for command in ("sisync list", "sisync version", "sisync log", "sisync config", "sisync update", "sisync cron start", "sisync cron status"):
+                self.assertEqual(len(lines), 8)
+                for command in ("sisync list", "sisync version", "sisync log", "sisync config", "sisync from", "sisync update", "sisync cron start", "sisync cron status"):
                     self.assertTrue(any(line.startswith(command + " ") for line in lines))
                 self.assertEqual(errors.getvalue(), "")
                 self.assertEqual(set(home.rglob("*")), before)
