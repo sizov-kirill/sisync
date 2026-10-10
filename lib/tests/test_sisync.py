@@ -308,6 +308,32 @@ class SyncTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_config_opens_vim_without_valid_config_and_returns_editor_exit_code(self):
+        for contents, code in ((None, 0), ("invalid config", 7)):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory(prefix="sisync editor ") as directory:
+                home = Path(directory)
+                config = home / ".sisync" / CONFIG_NAME
+                if contents is not None:
+                    config.parent.mkdir()
+                    config.write_text(contents)
+                editor = home / "vim"
+                editor.write_text(f'#!/bin/sh\n[ "$#" -eq 1 ] || exit 99\nprintf "edited in vim" > "$1" || exit 98\nexit {code}\n')
+                editor.chmod(0o700)
+                with patch("sisync.cli.Path.home", return_value=home), \
+                        patch.dict(os.environ, {"PATH": str(home)}):
+                    self.assertEqual(main(["config"]), code)
+                self.assertEqual(config.read_text(), "edited in vim")
+
+    def test_config_reports_missing_vim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch("sisync.cli.Path.home", return_value=home), \
+                    patch.dict(os.environ, {"PATH": str(home)}), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(main(["config"]), 1)
+            self.assertIn("Vim не найден", errors.getvalue())
+            self.assertFalse((home / ".sisync" / CONFIG_NAME).exists())
+
     def test_log_prints_contents_unchanged_without_valid_config(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -427,8 +453,8 @@ class CliTests(unittest.TestCase):
                         contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(main(["list"]), 0)
                 lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), 6)
-                for command in ("sisync list", "sisync version", "sisync log", "sisync update", "sisync cron start", "sisync cron status"):
+                self.assertEqual(len(lines), 7)
+                for command in ("sisync list", "sisync version", "sisync log", "sisync config", "sisync update", "sisync cron start", "sisync cron status"):
                     self.assertTrue(any(line.startswith(command + " ") for line in lines))
                 self.assertEqual(errors.getvalue(), "")
                 self.assertEqual(set(home.rglob("*")), before)

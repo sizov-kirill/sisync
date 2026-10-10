@@ -23,6 +23,7 @@ files:
 sisync list        # показать доступные команды
 sisync version     # показать установленную версию
 sisync log         # показать ~/.sisync/sisync.log
+sisync config      # открыть конфиг в Vim
 sisync update      # синхронизировать сейчас
 sisync cron start  # включить синхронизацию каждые 10 минут
 sisync cron status # проверить, установлено ли задание cron

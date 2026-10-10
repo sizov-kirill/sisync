@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 — 2026-10-10
+
+### Added
+
+- `sisync config` opens `~/.sisync/sisync.config.yaml` in Vim with the current terminal and returns the editor's exit code.
+- Allow editing a missing or invalid configuration, creating `~/.sisync` if needed, and report a clear error when Vim is unavailable.
+
 ## 0.3.1 — 2026-10-10
 
 ### Fixed
