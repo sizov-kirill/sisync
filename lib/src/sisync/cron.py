@@ -1,4 +1,4 @@
-"""Install and inspect just our own block in the user's crontab."""
+"""Install, remove, and inspect just our own block in the user's crontab."""
 
 import os
 import shlex
@@ -91,24 +91,40 @@ def status(home, emit=print):
     return True
 
 
+def write_crontab(content):
+    try:
+        result = subprocess.run(["crontab", "-"], input=content, capture_output=True,
+                                text=True, env=dict(os.environ, LC_ALL="C"), timeout=15)
+    except FileNotFoundError:
+        raise SisyncError("Команда crontab не найдена.") from None
+    except subprocess.TimeoutExpired:
+        raise SisyncError("crontab: превышено время ожидания (15 секунд).") from None
+    if result.returncode:
+        raise SisyncError(f"Не удалось установить crontab: {result.stderr.strip()}")
+
+
 def start(home, emit=print):
     load_config(home)
     with locked(home / ".sisync"):
         config = load_config(home)
-        env = dict(os.environ, LC_ALL="C")
-        try:
-            current = read_crontab()
-            updated = render_crontab(current, config.cron, home,
-                                    os.path.abspath(sys.executable), os.environ.get("PATH", os.defpath))
-            if updated != current:
-                result = subprocess.run(["crontab", "-"], input=updated, capture_output=True,
-                                        text=True, env=env, timeout=15)
-                if result.returncode:
-                    raise SisyncError(f"Не удалось установить crontab: {result.stderr.strip()}")
-        except FileNotFoundError:
-            raise SisyncError("Команда crontab не найдена.") from None
-        except subprocess.TimeoutExpired:
-            raise SisyncError("crontab: превышено время ожидания (15 секунд).") from None
+        current = read_crontab()
+        updated = render_crontab(current, config.cron, home,
+                                os.path.abspath(sys.executable), os.environ.get("PATH", os.defpath))
+        if updated != current:
+            write_crontab(updated)
         emit(f"Cron настроен: {config.cron}")
         emit(f"Лог: {home / '.sisync' / 'sisync.log'}")
+
+
+def stop(home, emit=print):
+    state = home / ".sisync"
+    state.mkdir(parents=True, exist_ok=True)
+    with locked(state):
+        current = read_crontab()
+        lines, _ = split_crontab(current)
+        if BEGIN not in current.splitlines():
+            emit("Cron выключен: задание sisync не установлено.")
+            return
+        write_crontab("\n".join(lines) + ("\n" if lines else ""))
+        emit("Cron выключен: задание sisync удалено.")
 

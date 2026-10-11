@@ -12,10 +12,79 @@ from unittest.mock import patch
 import yaml
 
 from sisync import __version__
-from sisync.cli import main
+from sisync.cli import MAX_LOG_BYTES, log, main
 from sisync.config import CONFIG_NAME, SisyncError, parse_config, validate_cron
-from sisync.cron import BEGIN, END, render_crontab, start, status
+from sisync.cron import BEGIN, END, render_crontab, start, status, stop
 from sisync.sync import Repository, git_environment, import_config, install_file, locked, read_local, RemoteFile, update
+
+
+class LogTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="sisync log-")
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        self.path = self.home / ".sisync" / "sisync.log"
+        self.path.parent.mkdir()
+        home_patch = patch("sisync.cli.Path.home", return_value=self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+
+    def test_clears_existing_full_log_and_keeps_appending_to_same_file(self):
+        for size in (MAX_LOG_BYTES, MAX_LOG_BYTES + 100):
+            with self.subTest(size=size):
+                self.path.write_bytes(b"x" * size)
+                inode = self.path.stat().st_ino
+                with self.path.open("a") as output:
+                    log("first", file=output)
+                    log("second", file=output)
+                contents = self.path.read_text()
+                self.assertEqual(len(contents.splitlines()), 2)
+                self.assertIn("] first\n", contents)
+                self.assertIn("] second\n", contents)
+                self.assertNotIn("\x00", contents)
+                self.assertEqual(self.path.stat().st_ino, inode)
+                self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_byte_threshold_below_exact_and_above_limit(self):
+        message = "Привет"
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            log(message)
+        line_bytes = len(captured.getvalue().encode("utf-8"))
+        for offset in (-1, 0, 1):
+            with self.subTest(offset=offset):
+                self.path.write_bytes(b"x" * (MAX_LOG_BYTES - line_bytes + offset))
+                with self.path.open("a", encoding="utf-8") as output:
+                    log(message, file=output)
+                expected_size = MAX_LOG_BYTES - 1 if offset < 0 else 0
+                self.assertEqual(self.path.stat().st_size, expected_size)
+
+    def test_multiline_output_continues_after_crossing_limit(self):
+        self.path.write_bytes(b"x" * (MAX_LOG_BYTES - 1))
+        with self.path.open("a") as output, contextlib.redirect_stdout(output):
+            log("first\nsecond")
+        self.assertEqual(self.path.read_text().split("] ", 1)[1], "second\n")
+
+    def test_config_failure_clears_full_log_and_records_error(self):
+        self.path.write_bytes(b"x" * MAX_LOG_BYTES)
+        with self.path.open("a") as output, contextlib.redirect_stderr(output):
+            self.assertEqual(main(["update"]), 1)
+        contents = self.path.read_text()
+        self.assertIn("sisync:", contents)
+        self.assertIn(CONFIG_NAME, contents)
+        self.assertLess(self.path.stat().st_size, MAX_LOG_BYTES)
+
+    def test_unrelated_redirected_output_and_log_inspection_are_preserved(self):
+        contents = "x" * MAX_LOG_BYTES
+        self.path.write_text(contents)
+        other = self.home / "other.log"
+        other.write_text(contents)
+        with other.open("a") as output:
+            log("keep", file=output)
+        self.assertTrue(other.read_text().startswith(contents))
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            self.assertEqual(main(["log"]), 0)
+        self.assertEqual(captured.getvalue(), contents)
+        self.assertEqual(self.path.read_text(), contents)
 
 
 class GitEnvironmentTests(unittest.TestCase):
@@ -366,6 +435,52 @@ class SyncTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_files_list_prints_configured_paths_in_order_without_syncing(self):
+        with tempfile.TemporaryDirectory(prefix="sisync files ") as directory:
+            home = Path(directory)
+            config = home / ".sisync" / CONFIG_NAME
+            config.parent.mkdir()
+            rules = {
+                "zshrc": {"repo-path": "shell/zshrc", "machine-path": "~/.zshrc"},
+                "editor settings": {"repo-path": "editor/settings.json",
+                                    "machine-path": str(home / "Library/Application Support/settings.json")},
+                "алиасы": {"repo-path": "shell/aliases", "machine-path": "~/.config/zsh/aliases.zsh"},
+            }
+            expected = (f"zshrc -> {home}/.zshrc\n"
+                        f"editor settings -> {home}/Library/Application Support/settings.json\n"
+                        f"алиасы -> {home}/.config/zsh/aliases.zsh\n")
+            for files, output_text in ((rules, expected), ({}, "")):
+                contents = yaml.safe_dump({"repo-link": "https://example.invalid/repo",
+                                           "cron": "*/5 * * * *", "files": files}, sort_keys=False)
+                config.write_text(contents)
+                before = set(home.rglob("*"))
+                with self.subTest(files=files), patch("sisync.cli.Path.home", return_value=home), \
+                        patch("sisync.cli.update") as sync, \
+                        patch("sisync.sync.subprocess.run") as run, \
+                        contextlib.redirect_stdout(io.StringIO()) as output, \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(main(["files", "list"]), 0)
+                self.assertEqual(output.getvalue(), output_text)
+                self.assertEqual(errors.getvalue(), "")
+                sync.assert_not_called()
+                run.assert_not_called()
+                self.assertEqual(set(home.rglob("*")), before)
+                self.assertEqual(config.read_text(), contents)
+
+    def test_files_list_reports_missing_or_invalid_config(self):
+        for contents in (None, "invalid config"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                if contents is not None:
+                    (home / ".sisync").mkdir()
+                    (home / ".sisync" / CONFIG_NAME).write_text(contents)
+                with patch("sisync.cli.Path.home", return_value=home), \
+                        contextlib.redirect_stdout(io.StringIO()) as output, \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(main(["files", "list"]), 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertIn("sisync:", errors.getvalue())
+
     def test_from_requires_repository_argument_without_loading_config(self):
         with patch("sisync.cli.load_config") as load, \
                 contextlib.redirect_stderr(io.StringIO()) as errors, \
@@ -434,15 +549,17 @@ class CliTests(unittest.TestCase):
             self.assertIn(str(home / ".sisync" / "sisync.log"), errors.getvalue())
             self.assertEqual(list(home.iterdir()), [])
 
-    def test_unknown_commands_suggest_list_before_loading_config(self):
-        for args in (["go"], ["go", "--help"], ["cron", "go"]):
+    def test_unknown_commands_print_full_list_before_loading_config(self):
+        with contextlib.redirect_stdout(io.StringIO()) as available:
+            self.assertEqual(main(["list"]), 0)
+        for args in (["go"], ["go", "--help"], ["filess", "list"], ["cron", "go"], ["files", "go"]):
             with self.subTest(args=args), \
                     patch("sisync.cli.load_config", side_effect=SisyncError("invalid config")) as config, \
                     contextlib.redirect_stdout(io.StringIO()) as output, \
                     contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(main(args), 2)
             self.assertEqual(output.getvalue(), "")
-            self.assertEqual(errors.getvalue(), "такой команды нет, run sisync list\n")
+            self.assertEqual(errors.getvalue(), "такой команда нет, вот такие есть:\n\n" + available.getvalue())
             config.assert_not_called()
 
     def test_version_commands_work_without_valid_config(self):
@@ -520,8 +637,8 @@ class CliTests(unittest.TestCase):
                         contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(main(["list"]), 0)
                 lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), 8)
-                for command in ("sisync list", "sisync version", "sisync log", "sisync config", "sisync from", "sisync update", "sisync cron start", "sisync cron status"):
+                self.assertEqual(len(lines), 10)
+                for command in ("sisync list", "sisync version", "sisync log", "sisync config", "sisync files list", "sisync from", "sisync update", "sisync cron start", "sisync cron stop", "sisync cron status"):
                     self.assertTrue(any(line.startswith(command + " ") for line in lines))
                 self.assertEqual(errors.getvalue(), "")
                 self.assertEqual(set(home.rglob("*")), before)
@@ -581,6 +698,69 @@ class ConfigTests(unittest.TestCase):
 
 
 class CronTests(unittest.TestCase):
+    def test_stop_without_valid_config_preserves_unrelated_entries(self):
+        before = "MAILTO=user@example.invalid\n# unrelated\n\n0 9 * * * /usr/bin/true\n"
+        after = "\n# another job\n@daily /usr/bin/true\n"
+        for config in (None, "invalid config"):
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                if config is not None:
+                    (home / ".sisync").mkdir()
+                    (home / ".sisync" / CONFIG_NAME).write_text(config)
+                table = render_crontab(before, "*/2 * * * *", home, sys.executable, "/usr/bin") + after
+                with patch("sisync.cli.Path.home", return_value=home), \
+                        patch("sisync.cron.read_crontab", return_value=table), \
+                        patch("sisync.cron.write_crontab") as write, \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(main(["cron", "stop"]), 0)
+                write.assert_called_once_with(before + after)
+                self.assertIn("удалено", output.getvalue())
+                if config is not None:
+                    self.assertEqual((home / ".sisync" / CONFIG_NAME).read_text(), config)
+
+    def test_stop_without_managed_block_does_not_write(self):
+        for table in ("", "# keep\n@daily /usr/bin/true\n"):
+            with self.subTest(table=table), tempfile.TemporaryDirectory() as directory, \
+                    patch("sisync.cron.read_crontab", return_value=table), \
+                    patch("sisync.cron.write_crontab") as write:
+                messages = []
+                stop(Path(directory), messages.append)
+                write.assert_not_called()
+                self.assertIn("не установлено", messages[0])
+
+    def test_stop_rejects_malformed_blocks_without_writing(self):
+        for table in (BEGIN, END, f"{BEGIN}\n{BEGIN}\n{END}"):
+            with self.subTest(table=table), tempfile.TemporaryDirectory() as directory, \
+                    patch("sisync.cron.read_crontab", return_value=table), \
+                    patch("sisync.cron.write_crontab") as write:
+                with self.assertRaises(SisyncError):
+                    stop(Path(directory))
+                write.assert_not_called()
+
+    def test_stop_respects_update_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".sisync").mkdir()
+            with locked(home / ".sisync"), patch("sisync.cron.read_crontab") as read:
+                with self.assertRaisesRegex(SisyncError, "уже идёт"):
+                    stop(home)
+                read.assert_not_called()
+
+    def test_stop_reports_crontab_write_failures(self):
+        outcomes = (FileNotFoundError(), subprocess.TimeoutExpired("crontab", 15),
+                    subprocess.CompletedProcess([], 1, "", "permission denied"))
+        for outcome in outcomes:
+            kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory, \
+                    patch("sisync.cli.Path.home", return_value=Path(directory)), \
+                    patch("sisync.cron.read_crontab", return_value=f"{BEGIN}\n{END}\n"), \
+                    patch("sisync.cron.subprocess.run", **kwargs), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(main(["cron", "stop"]), 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertIn("crontab", errors.getvalue())
+
     def test_status_disabled_for_empty_unrelated_or_commented_jobs(self):
         home = Path("/tmp/sisync-home")
         job = render_crontab("", "*/10 * * * *", home, sys.executable, "/usr/bin")
@@ -657,6 +837,14 @@ class CronTests(unittest.TestCase):
                 self.assertEqual(first, table.read_text())
                 self.assertIn("-m sisync update", first)
                 self.assertIn(str(home / ".sisync" / "sisync.log"), first)
+                stop(home, lambda message: None)
+                self.assertEqual(table.read_text(), "")
+                self.assertFalse(status(home, lambda message: None))
+                modified = table.stat().st_mtime_ns
+                stop(home, lambda message: None)
+                self.assertEqual(table.stat().st_mtime_ns, modified)
+                start(home, lambda message: None)
+                self.assertTrue(status(home, lambda message: None))
 
 
 if __name__ == "__main__":

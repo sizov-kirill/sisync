@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.1 — 2026-10-10
+
+### Changed
+
+- Unknown commands now print `такой команда нет, вот такие есть:` followed by the same command list as `sisync list`, including for unknown `cron` and `files` subcommands. Keep exit code 2 and report the error without requiring a valid configuration.
+
+## 0.8.0 — 2026-10-10
+
+### Added
+
+- `sisync files list` prints configured files as `name -> machine-path`, one per line in configuration order, with `~/` expanded to the current home directory.
+- List files locally without synchronizing or contacting Git. An empty file configuration produces no output; missing or invalid configurations report an error.
+
+## 0.7.0 — 2026-10-10
+
+### Added
+
+- `sisync cron stop` removes the managed SISYNC block from crontab while preserving unrelated jobs, comments, and environment settings.
+- Allow stopping cron with a missing or invalid configuration. Repeated stops succeed without rewriting the crontab; malformed SISYNC blocks are rejected without changes.
+
+## 0.6.0 — 2026-10-10
+
+### Added
+
+- Automatically clear `~/.sisync/sisync.log` when logged output reaches 1 MB (1,000,000 bytes), checking before logging and after each line, including errors.
+- Keep the same log file and continue appending without backups. Existing cron entries need no changes after upgrading sisync; terminal output and unrelated redirected files are unaffected.
+
 ## 0.5.0 — 2026-10-10
 
 ### Added
